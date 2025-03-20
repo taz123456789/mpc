@@ -1,9 +1,7 @@
-#ifndef M_PI
 #define M_PI 3.14159265358979323846
-#endif
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/twist.hpp>
-#include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/point.hpp>  // for Point message
 #include <visualization_msgs/msg/marker.hpp>
 #include <vector>
 #include <cmath>
@@ -13,13 +11,13 @@
 using namespace std;
 
 struct State {
-    double x, y, theta; // Position and orientation
-    double vx, vy;      // Linear velocities in x and y directions
+    double x, y, theta; // position and orientation
+    double vx, vy;      // linear velocities in directions x and y 
 };
 
-struct Control {
-    double vx, vy; // Linear velocities in x and y directions
-    double omega;  // Angular velocity
+struct Control {//control velocities
+    double vx, vy; // linear in x and y directions 
+    double omega;  // angular 
 };
 
 State predict_state(const State& current_state, const Control& control_input, double dt) {
@@ -30,7 +28,7 @@ State predict_state(const State& current_state, const Control& control_input, do
     return predicted_state;
 }
 
-// Cost function (position error + control effort)
+// cost function = position error + control effort
 double cost_function(const State& state, const Control& control, const State& target, double control_weight) {
     double distance = sqrt(pow(state.x - target.x, 2) + pow(state.y - target.y, 2));
     double control_effort = control.vx * control.vx + control.vy * control.vy + control.omega * control.omega;
@@ -43,14 +41,14 @@ Control nmpc_control(const State& current_state, const State& target, double dt,
     double learning_rate = 1.0;
     int max_iterations = 100;
 
-    Control control = { 0.05, 0.05, 0.05 }; // Initialization
+    Control control = { 0.05, 0.05, 0.05 }; // initial
 
     for (int iter = 0; iter < max_iterations; ++iter) {
         State predicted_state = predict_state(current_state, control, dt);
 
         double cost = cost_function(predicted_state, control, target, control_weight);
 
-        // Gradients
+        // gradients
         double grad_vx = (cost_function(predict_state(current_state, { control.vx + 0.01, control.vy, control.omega }, dt),
             { control.vx + 0.01, control.vy, control.omega }, target, control_weight) - cost) / 0.01;
         double grad_vy = (cost_function(predict_state(current_state, { control.vx, control.vy + 0.01, control.omega }, dt),
@@ -58,12 +56,12 @@ Control nmpc_control(const State& current_state, const State& target, double dt,
         double grad_omega = (cost_function(predict_state(current_state, { control.vx, control.vy, control.omega + 0.01 }, dt),
             { control.vx, control.vy, control.omega + 0.01 }, target, control_weight) - cost) / 0.01;
 
-        // Update controls
+        //  controls update
         control.vx -= learning_rate * grad_vx;
         control.vy -= learning_rate * grad_vy;
         control.omega -= learning_rate * grad_omega;
 
-        // Clamp control inputs
+        // clamp control inputs
         control.vx = max(-1.0, min(1.0, control.vx));
         control.vy = max(-1.0, min(1.0, control.vy));
         control.omega = max(-M_PI / 4, min(M_PI / 4, control.omega));
@@ -75,47 +73,42 @@ Control nmpc_control(const State& current_state, const State& target, double dt,
 class NMPCControllerNode : public rclcpp::Node {
 public:
     NMPCControllerNode()
-        : Node("omnidirectional_robot"), current_state_{ 0.0, 0.0, 0.0, 0.0, 0.0 }, dt_(0.05), control_weight_(0.1), waypoint_index_(0) {
+        : Node("omnidirectional_robot"), current_state_{ 0.0, 0.0, 0.0, 0.0, 0.0 }, dt_(0.05), control_weight_(0.1) {
         cmd_vel_publisher_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
         marker_publisher_ = this->create_publisher<visualization_msgs::msg::Marker>("visualization_marker", 10);
         odom_publisher_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
         path_publisher_ = this->create_publisher<nav_msgs::msg::Path>("path", 10);
 
-        global_path_ = {
-            { 10.0, 0.0, 0.0 },
-            { 20.0, -10.0, 0.0 },
-            { -10.0, 20.0, 0.0 },
-            { 5.0, -10.0, 0.0 },
-        };
-        path_msg_.header.frame_id = "map";
+        target_position_sub_ = this->create_subscription<geometry_msgs::msg::Point>(
+            "/target_position", 10, [this](const geometry_msgs::msg::Point::SharedPtr msg) {
+                target_position_ = *msg;
+                has_target_ = true;
+            });
 
         timer_ = this->create_wall_timer(
             chrono::milliseconds(static_cast<int>(dt_ * 1000)),
             [this]() { control_loop(); });
-
-        publish_path_visualization();
     }
 
 private:
     void control_loop() {
-        if (waypoint_index_ >= global_path_.size()) {
-            RCLCPP_INFO(this->get_logger(), "All waypoints reached. Stopping the robot.");
-            stop_robot();
+        if (!has_target_) {
+            RCLCPP_INFO(this->get_logger(), "No target position received yet.");
             return;
         }
 
-        State target = global_path_[waypoint_index_]; // Current target
+        State target = { target_position_.x, target_position_.y, 0.0, 0.0, 0.0 }; // Current target
 
-        // Current state and target
+        // current state and target
         RCLCPP_INFO(this->get_logger(), "Current State: x=%.2f, y=%.2f, theta=%.2f | Target: x=%.2f, y=%.2f",
             current_state_.x, current_state_.y, current_state_.theta, target.x, target.y);
 
         Control control = nmpc_control(current_state_, target, dt_, control_weight_);
 
-        // Update state
+        // state update
         current_state_ = predict_state(current_state_, control, dt_);
 
-        // Publish commands
+        // publish commands
         auto cmd_vel_msg = geometry_msgs::msg::Twist();
         cmd_vel_msg.linear.x = control.vx;
         cmd_vel_msg.linear.y = control.vy;
@@ -128,45 +121,12 @@ private:
         RCLCPP_INFO(this->get_logger(),
             "Control: vx=%.2f, vy=%.2f, omega=%.2f", control.vx, control.vy, control.omega);
 
-        // Check if waypoint is reached
+        // ensures ifthe target is reached
         double distance_to_target = sqrt(pow(current_state_.x - target.x, 2) + pow(current_state_.y - target.y, 2));
-        if (distance_to_target < 0.3) {  // Threshold
-            waypoint_index_++; // Switch to next point
-            RCLCPP_INFO(this->get_logger(), "Waypoint %lu reached. Moving to the next waypoint.", waypoint_index_);
+        if (distance_to_target < 0.3) {  // threshold
+            RCLCPP_INFO(this->get_logger(), "Target reached.");
+            has_target_ = false; // reset target
         }
-    }
-
-    void stop_robot() {
-        auto cmd_vel_msg = geometry_msgs::msg::Twist();
-        cmd_vel_msg.linear.x = 0.0;
-        cmd_vel_msg.linear.y = 0.0;
-        cmd_vel_msg.angular.z = 0.0;
-        cmd_vel_publisher_->publish(cmd_vel_msg);
-    }
-
-    void publish_path_visualization() {
-        auto marker = visualization_msgs::msg::Marker();
-        marker.header.frame_id = "map"; // Rviz frame
-        marker.header.stamp = now();
-        marker.ns = "path";
-        marker.id = 0;
-        marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-        marker.action = visualization_msgs::msg::Marker::ADD;
-        marker.scale.x = 0.1;
-        marker.color.a = 1.0;
-        marker.color.r = 0.0;
-        marker.color.g = 1.0;
-        marker.color.b = 0.0;
-
-        for (const auto& waypoint : global_path_) {
-            geometry_msgs::msg::Point p;
-            p.x = waypoint.x;
-            p.y = waypoint.y;
-            p.z = 0.0;
-            marker.points.push_back(p);
-        }
-
-        marker_publisher_->publish(marker);
     }
 
     void publish_odometry() {
@@ -192,17 +152,18 @@ private:
         path_publisher_->publish(path_msg_);
     }
 
-    // Publishers
+    // publishers
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_publisher_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_publisher_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_publisher_;
+    rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr target_position_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     State current_state_;
-    vector<State> global_path_;
+    geometry_msgs::msg::Point target_position_;
     nav_msgs::msg::Path path_msg_;
-    size_t waypoint_index_;
+    bool has_target_ = false;
     double dt_;
     double control_weight_;
 };
